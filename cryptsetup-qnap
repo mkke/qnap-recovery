@@ -1,0 +1,25 @@
+#!/bin/bash
+LV=$1
+PASS=$2
+
+if [ -z "$PASS" ]; then
+  echo "Usage: cryptsetup-qnap [lv device] [web interface password]"
+  exit 0
+fi
+
+if [ ! -e /dev/mapper/$LV ]; then
+  echo "/dev/mapper/$LV: not found"
+  exit 1
+fi
+
+LEN=`echo -n $PASS | wc -c`
+for i in `seq $LEN -1 8`; do
+  ENCPASS=$(storage_util --encrypt_pwd pwd=`echo -n $PASS | cut -c -$i` | cut -d: -f2)
+  echo trying password len $i = "$ENCPASS"
+  if echo -n "$ENCPASS" | cryptsetup luksOpen /dev/mapper/$LV ${LV}-luks --key-file=-; then
+    echo luks opened successful as /dev/mapper/${LV}-luks
+    exit 0
+  fi
+done
+exit 1
+

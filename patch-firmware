@@ -1,0 +1,191 @@
+#!/usr/bin/perl -w
+# vim: set ts=2 sw=2 sts=2 expandtab
+use strict;
+use File::Spec;
+use File::Copy;
+use File::Temp qw(tempdir);
+use JSON;
+use Getopt::Long;
+
+my $patchInitrd = 1;
+GetOptions("patch-initrd!" => \$patchInitrd);
+		
+if (@ARGV != 2) {
+  print "Usage: patch-firmware [orig firmware bin] [update tgz]\n";
+  exit 0;
+}
+
+if (! -x "/usr/sbin/kpartx") {
+  exit_error("cannot run /usr/sbin/kpartx. Am i root?");
+}
+
+my $origPath = shift;
+my $updatePath = shift;
+
+$origPath =~ /^(.+\/)?F_([a-zA-Z0-9-]+)_(\d{8})-([\d.]+).img$/ or exit_error("Unexpected orig firware name");
+my $origDir = $1 || "";
+my $origDeviceName = $2;
+my $origDate = $3;
+my $origVersion = $4;
+
+$updatePath =~ /^(?:.+\/)?([a-zA-Z0-9-]+)_(\d{8})-([\d.]+).(tgz|.tar.gz)$/ or exit_error("Unexpected update firware name");
+my $updateDeviceName = $1;
+my $updateDate = $2;
+my $updateVersion = $3;
+
+if ($origDeviceName ne $updateDeviceName) {
+  exit_error("device name mismatch");
+}
+
+# patching initrd...
+my $tmpInitrdImgPath;
+if ($patchInitrd) {
+	my $tmpInitrdArchPath = tempdir( CLEANUP => 1 );
+	my $tmpInitrdPath = tempdir( CLEANUP => 1 );
+	print "preparing patched initrd in $tmpInitrdPath...\n";
+	if (system("/usr/bin/tar", "xzf", $updatePath, "-C", $tmpInitrdArchPath, "initrd.boot") != 0) {
+	  exit_error("extracting initrd archive failed");
+	}
+	$tmpInitrdImgPath = "$tmpInitrdArchPath/initrd.boot";
+
+	if (system("xz -cd $tmpInitrdImgPath | cpio -idm --no-absolute-filenames -D $tmpInitrdPath") != 0) {
+	  exit_error("extracting initrd failed");
+	}
+
+	open(my $fh, ">", "$tmpInitrdPath/init") or exit_error("$tmpInitrdPath/init: cannot create: $!");
+	print $fh <<'_END_';
+#!/bin/sh
+mkdir new_root
+mount -t tmpfs -o mode=0755,size=256000k none /new_root
+/bin/busybox tar -cf - . | tar -xf - -C /new_root &> /dev/null
+/bin/rm -fr /new_root/init
+/bin/mount -t devtmpfs devtmpfs /new_root/dev
+/bin/mkdir -p /new_root/proc /new_root/sys /new_root/boot
+/bin/mount -t proc proc /new_root/proc
+/bin/mount -t sysfs sysfs /new_root/sys
+/bin/mount /dev/sda2 /new_root/boot
+/bin/tar xjf /new_root/boot/boot/rootfs2.bz -C /new_root
+#exec /bin/busybox switch_root /new_root /sbin/init
+exec /bin/busybox switch_root -c /dev/ttyS0 /new_root /sbin/getty -L ttyS0 115200 vt100
+_END_
+	chmod(0755, $fh);
+	close $fh or exit_error("$tmpInitrdPath/init: cannot close: $!");
+
+	open($fh, ">", "$tmpInitrdPath/etc/platform.conf") or exit_error("$tmpInitrdPath/etc/platform.conf: cannot create: $!");
+	print $fh "Platform = X86_KVM\n";
+	chmod(0644, $fh);
+	close $fh or exit_error("$tmpInitrdPath/etc/platform.conf: cannot close: $!");
+
+        foreach my $config (qw(config default_config)) {
+		open($fh, ">", "$tmpInitrdPath/etc/$config/Model_Name.conf") or exit_error("$tmpInitrdPath/etc/$config/Model_Name.conf: cannot create: $!");
+		print $fh "TS-KVM\n";
+		chmod(0644, $fh);
+		close $fh or exit_error("$tmpInitrdPath/etc/$config/Model_Name.conf: cannot close: $!");
+	}
+
+	copy("cryptsetup-qnap", "$tmpInitrdPath/bin/cryptsetup-qnap") or exit_error("$tmpInitrdPath/bin/cryptsetup-qnap: copy failed");
+
+        foreach my $patch (qw(init_check.sh.diff)) {
+		if (system("/usr/bin/patch -p1 -d $tmpInitrdPath < $patch") != 0) {
+		  exit_error("patch $patch failed");
+		}
+	}
+
+	if (system("cd $tmpInitrdPath && find . | cpio -H newc -o | xz -3 --format=lzma > $tmpInitrdImgPath") != 0) {
+	  exit_error("building new initrd failed");
+	}
+}
+
+print "copying original firmware...\n";
+my $patchedPath = File::Spec->rel2abs($origDir . "F_${origDeviceName}_${updateDate}_${updateVersion}.img");
+copy $origPath, $patchedPath or exit_error("$patchedPath: copying from $origPath failed: $!"); 
+(system("/usr/sbin/kpartx", "-as", $patchedPath) == 0) or exit_error("$patchedPath: kpartx add failed: $!");
+my $loopBackFile = $patchedPath;
+
+END {
+  if (defined($loopBackFile)) {
+    (system("/usr/sbin/kpartx", "-d", $loopBackFile) == 0) or exit_error("$loopBackFile: kpartx delete failed: $!");
+  }
+}
+
+print "patching firmware...\n";
+my $loopdev = find_loopdev($loopBackFile) or exit_error("$loopBackFile: loop dev not found");
+$loopdev =~ /^\/dev\/(loop\d+)$/ or exit_error("$loopdev: unexpected loop dev");
+my $mapperprefix = "/dev/mapper/$1";
+
+patch_rfs("${mapperprefix}p2", "QTS_BOOT_PART2");
+patch_rfs("${mapperprefix}p3", "QTS_BOOT_PART3");
+exit 0;
+
+sub patch_rfs {
+  my $targetDev = shift;
+  my $label = shift;
+
+  if (!-e $targetDev) {
+    exit_error("$targetDev: target device not found");
+  }
+
+  (system("/usr/sbin/mke2fs", "-m0", "-F", "-b", "1024", "-I", "128", "-L", $label, "-E", "nodiscard", $targetDev) == 0) or exit_error("$targetDev: mke2fs failed");
+  
+  my $tmpMountPath = tempdir( CLEANUP => 0 );
+  if (system("/usr/bin/mount -v $targetDev $tmpMountPath") != 0) {
+    rmdir $tmpMountPath;
+    exit_error("$targetDev: mount failed");
+  }
+
+  my $err = patch_rfs_mounted($tmpMountPath);
+
+  if (system("/usr/bin/umount -v $tmpMountPath") != 0) {
+    exit_error("$targetDev: umount failed");
+  } 
+  
+  rmdir $tmpMountPath;
+
+  if (defined $err) {
+    exit_error($err);
+  }
+}
+
+sub patch_rfs_mounted {
+  my $tmpMountPath = shift;
+
+  my $tmpMountBootPath = "$tmpMountPath/boot";
+
+  if (!mkdir $tmpMountBootPath) {
+    return "$tmpMountBootPath: mkdir failed: $!";
+  }
+
+  my @members = ("bzImage*", "rootfs2.bz*", "rootfs_ext.tgz*", "qpkg.tar*");
+
+  if ($patchInitrd) {
+    copy($tmpInitrdImgPath, "$tmpMountBootPath/initrd.boot") or return "$tmpMountBootPath/initrd.boot: copy failed: $!";
+  } else {
+    push @members, "initrd.boot*";
+  }
+
+  if (system("/usr/bin/tar", "xzf", $updatePath, "-C", $tmpMountBootPath, "--wildcards", @members) != 0) {
+    return "$tmpMountBootPath: extracting new files failed";
+  }
+
+  return undef;
+}
+
+sub find_loopdev {
+  my $backFile = shift;
+
+  my $loinfo = decode_json(`/usr/sbin/losetup --list -J`);
+  foreach my $loopdev (@{$loinfo->{loopdevices}}) {
+    if ($loopdev->{'back-file'} eq $loopBackFile) {
+      return $loopdev->{name};
+    }
+  }
+
+  return undef;
+}
+
+sub exit_error {
+  my $text = shift;
+  print "ERROR: $text\n";
+  exit 1;
+}
+

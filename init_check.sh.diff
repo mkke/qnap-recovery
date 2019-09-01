@@ -1,0 +1,51 @@
+--- /etc/init.d/init_check.sh.orig
++++ /etc/init.d/init_check.sh
+@@ -436,8 +436,8 @@
+ if [ "x${Model_Name}" = "xTS-X77" ]; then
+ 	/sbin/hal_app --boot > /tmp/dom.conf
+ 	/etc/init.d/reset_sata.sh 1>>/dev/kmsg 2>>/dev/kmsg
+-else
+-	/sbin/hal_app --boot
++#else
++#	/sbin/hal_app --boot
+ fi
+ 
+ if [ -f /etc/IS_mQTS ]; then
+@@ -620,7 +620,7 @@
+ #sync hwclock before hal daemon start
+ /sbin/hwclock -s
+ #run hal_daemon,check_lan_port.sh is implement by load_lan_module.sh and hal_util_net.c
+-/sbin/daemon_mgr hal_daemon start "/sbin/hal_daemon -f"
++#/sbin/daemon_mgr hal_daemon start "/sbin/hal_daemon -f"
+ 
+ preset_CHN_default_port
+ 
+@@ -654,15 +654,15 @@
+ /sbin/storage_util --reset_capability
+ 
+ # Initial realtek transcoding daemon
+-if [ -x /usr/sbin/rtk_transcoding_daemon ]; then
+-    /usr/sbin/rtk_transcoding_daemon &
+-fi
++#if [ -x /usr/sbin/rtk_transcoding_daemon ]; then
++#    /usr/sbin/rtk_transcoding_daemon &
++#fi
+ 
+ /sbin/hal_app --get_mcu_version mode=0 |cut -d"=" -f 2 |cut -c 2-3 |grep -q "30"
+ [ $? != 0 ] || echo 1 > /sys/module/hal_netlink/parameters/send_poweroff_single_byte
+ 
+ #init graphic driver
+-/etc/init.d/init_gpu.sh start
++#/etc/init.d/init_gpu.sh start
+ 
+ if [ -d /sys/fs/cgroup ]; then
+ 	/bin/mkdir /sys/fs/cgroup/cpu 1>/dev/null 2>&1
+@@ -699,6 +699,7 @@
+     /bin/echo "Fail to mount HDD system root."
+     /sbin/write_log "HDD cannot be mounted because the Internal Model does not match." 2
+ fi
++exit 0
+ 
+ count=0
+ while [ "$count" -lt "3" ]; do
+
