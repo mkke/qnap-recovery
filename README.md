@@ -82,7 +82,6 @@ pvs
 lvs
 
 # activate the thin pool and the volume
-lvchange -a y vg1/tp1 # maybe not necessary?
 lvchange -a y vg1/lv2
 
 # check the content, if it contains a LUKS header -> encrypted
@@ -100,6 +99,22 @@ mount -t ext4 /dev/mapper/vg1-lv4 /mnt/ext/
 
 # get an IP address for file transfer
 dhclient -i eth0
+```
+
+Copying newer files
+===================
+
+The qnap userland is quite simple, so we have to be creative:
+
+``` bash
+# create a file with a suitable mtime
+touch -t 201904100000 /tmp/mark
+
+# find newer files
+find . -type t -newer /tmp/mark > /tmp/filelist
+
+# copy them with rsync
+rsync -avx --progress --files-from=/tmp/filelist . mkke@1.2.3.4:/my-data
 ```
 
 Firmware Update Decryption
